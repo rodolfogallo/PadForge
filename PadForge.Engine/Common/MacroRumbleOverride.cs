@@ -144,6 +144,7 @@ namespace PadForge.Engine
             scratch.Period = raw.Period;
             scratch.DeviceGain = raw.DeviceGain;
             scratch.ConditionAxisCount = raw.ConditionAxisCount;
+            scratch.ConditionEffectType = raw.ConditionEffectType;
             scratch.ConditionAxes = raw.ConditionAxes;
             return scratch;
         }

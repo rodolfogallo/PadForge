@@ -1051,6 +1051,7 @@ namespace PadForge.Common.Input
                     dcap.DeviceGain = effective.DeviceGain;
                     dcap.HasConditionData = effective.HasConditionData;
                     dcap.ConditionAxisCount = effective.ConditionAxisCount;
+                    dcap.ConditionEffectType = effective.ConditionEffectType;
                     dcap.ConditionAxes = effective.ConditionAxes;
                     directionalSource = dcap;
                     // The gain belongs with the force. Reading it from the
@@ -1086,6 +1087,7 @@ namespace PadForge.Common.Input
                 _combinedVibration.DeviceGain = directionalSource.DeviceGain;
                 _combinedVibration.HasConditionData = directionalSource.HasConditionData;
                 _combinedVibration.ConditionAxisCount = directionalSource.ConditionAxisCount;
+                _combinedVibration.ConditionEffectType = directionalSource.ConditionEffectType;
                 _combinedVibration.ConditionAxes = directionalSource.ConditionAxes;
             }
             else
@@ -1106,6 +1108,7 @@ namespace PadForge.Common.Input
                 _combinedVibration.Direction = 0;
                 _combinedVibration.Period = 0;
                 _combinedVibration.ConditionAxisCount = 0;
+                _combinedVibration.ConditionEffectType = 0;
             }
 
             // Reverse output relay (#138): a "peer://" device lives on another PC.
@@ -1282,6 +1285,7 @@ namespace PadForge.Common.Input
                     // Spring / damper / friction (game-driven condition effect) when
                     // present, else a constant force from the projected steering level.
                     bool hasCond = cv.HasConditionData && cv.ConditionAxisCount > 0 && cv.ConditionAxes != null;
+                    uint conditionType = cv.ConditionEffectType != 0 ? cv.ConditionEffectType : cv.EffectType;
                     var ca = hasCond ? cv.ConditionAxes[0] : default; // axis 0 = steering
                     short level = ForceFeedbackState.ComputeWheelSteeringLevel(cv, overallGain);
                     // Condition coefficients + clip scale by device gain too, matching the
@@ -1303,6 +1307,7 @@ namespace PadForge.Common.Input
                     // A setting of zero still silences, since the scale
                     // already zeroed the motors.
                     short wheelForce = level != 0 ? level : ForceFeedbackState.ComputeWheelRumbleLevel(cv, 100);
+                    if (hasCond && !cv.HasDirectionalData) wheelForce = 0;
                     // Auto-center strength (Wheel-tab slider). Fanatec has no firmware
                     // autocenter and ftec_set_range's f5 disables its stock spring, so
                     // Fanatec centering is a per-frame software spring (slot 1); Logitech
@@ -1317,7 +1322,7 @@ namespace PadForge.Common.Input
                         && ForceFeedbackState.IsPeriodicEffect(cv.EffectType))
                         ? ForceFeedbackState.ComputeWheelSteeringPeak(cv, overallGain) : 0;
                     var ffbSig = new WheelFfbSig(hasCond, cv.HasDirectionalData, wheelForce, periodicPeak, acMag,
-                        (int)cv.EffectType, (int)cv.Period,
+                        (int)(hasCond ? conditionType : cv.EffectType), (int)cv.Period,
                         hasCond ? (int)ca.PositiveCoefficient : 0, hasCond ? (int)ca.NegativeCoefficient : 0,
                         hasCond ? (int)ca.Offset : 0, hasCond ? (int)ca.DeadBand : 0,
                         hasCond ? (int)ca.PositiveSaturation : 0, hasCond ? (int)ca.NegativeSaturation : 0, condGain,
@@ -1401,7 +1406,7 @@ namespace PadForge.Common.Input
                         if (isLogitechWheel)
                         {
                             if (hasCond)
-                                delivered = LogitechRawHidWriter.WriteCondition(ud.DevicePath, 0, cv.EffectType,
+                                delivered = LogitechRawHidWriter.WriteCondition(ud.DevicePath, 0, conditionType,
                                     ca.PositiveCoefficient, ca.NegativeCoefficient, ca.Offset,
                                     (int)ca.DeadBand, (int)ca.PositiveSaturation, (int)ca.NegativeSaturation, condGain,
                                     LogitechRawHidWriter.HasFrictionCap(ud.ProdId));
@@ -1413,24 +1418,22 @@ namespace PadForge.Common.Input
                             delivered = true;
                             if (_appliedWheelFfb.TryGetApplied(ud.DevicePath, out var previous))
                             {
-                                if (previous.HasCond && (!hasCond || previous.Effect != (int)cv.EffectType))
+                                if (previous.HasCond && (!hasCond || previous.Effect != (int)conditionType))
                                     delivered = FanatecRawHidWriter.WriteWheelCondition(ud.DevicePath, (uint)previous.Effect,
                                         0, 0, 0, 0, 0, 0, 100);
-                                else if (hasCond && !previous.HasCond)
-                                    delivered = FanatecRawHidWriter.WriteWheelConstantForce(ud.DevicePath, 0, ud.ProdId);
                             }
                             if (delivered)
                             {
-                                if (hasCond)
-                                    delivered = FanatecRawHidWriter.WriteWheelCondition(ud.DevicePath, cv.EffectType,
-                                        ca.PositiveCoefficient, ca.NegativeCoefficient, ca.Offset,
-                                        (int)ca.DeadBand, (int)ca.PositiveSaturation, (int)ca.NegativeSaturation, condGain);
-                                else if (urgentStop)
+                                if (urgentStop)
                                     delivered = FanatecRawHidWriter.WriteStopAllEffects(ud.DevicePath, ud.ProdId);
                                 else
                                 {
                                     delivered = FanatecRawHidWriter.WriteWheelConstantForce(ud.DevicePath, wheelForce, ud.ProdId);
-                                    if (delivered && acMag > 0)
+                                    if (delivered && hasCond)
+                                        delivered = FanatecRawHidWriter.WriteWheelCondition(ud.DevicePath, conditionType,
+                                            ca.PositiveCoefficient, ca.NegativeCoefficient, ca.Offset,
+                                            (int)ca.DeadBand, (int)ca.PositiveSaturation, (int)ca.NegativeSaturation, condGain);
+                                    if (delivered && !hasCond && acMag > 0)
                                         delivered = FanatecRawHidWriter.WriteAutocenter(ud.DevicePath, acMag);
                                 }
                             }
@@ -1439,7 +1442,7 @@ namespace PadForge.Common.Input
                         else
                         {
                             if (hasCond)
-                                delivered = ThrustmasterRawHidWriter.WriteCondition(ud.DevicePath, cv.EffectType,
+                                delivered = ThrustmasterRawHidWriter.WriteCondition(ud.DevicePath, conditionType,
                                     ca.PositiveCoefficient, ca.NegativeCoefficient, ca.Offset,
                                     (int)ca.DeadBand, (int)ca.PositiveSaturation, (int)ca.NegativeSaturation, condGain);
                             else if (cv.HasDirectionalData && cv.Period > 0 && ForceFeedbackState.IsPeriodicEffect(cv.EffectType))
@@ -1614,6 +1617,7 @@ namespace PadForge.Common.Input
             scratch.Period = src.Period;
             scratch.DeviceGain = src.DeviceGain;
             scratch.ConditionAxisCount = src.ConditionAxisCount;
+            scratch.ConditionEffectType = src.ConditionEffectType;
             scratch.ConditionAxes = src.ConditionAxes;
             return scratch;
         }
@@ -1784,6 +1788,7 @@ namespace PadForge.Common.Input
                     final.Period = withMacro.Period;
                     final.DeviceGain = withMacro.DeviceGain;
                     final.ConditionAxisCount = withMacro.ConditionAxisCount;
+                    final.ConditionEffectType = withMacro.ConditionEffectType;
                     final.ConditionAxes = withMacro.ConditionAxes;
                     selected.LeftMotorSpeed = 0;
                     selected.RightMotorSpeed = 0;
@@ -1890,6 +1895,7 @@ namespace PadForge.Common.Input
                     final.Period = directionalSource.Period;
                     final.DeviceGain = directionalSource.DeviceGain;
                     final.ConditionAxisCount = directionalSource.ConditionAxisCount;
+                    final.ConditionEffectType = directionalSource.ConditionEffectType;
                     final.ConditionAxes = directionalSource.ConditionAxes;
                 }
                 else
@@ -1908,6 +1914,7 @@ namespace PadForge.Common.Input
                     selected.Period = selectedDirectional.Period;
                     selected.DeviceGain = selectedDirectional.DeviceGain;
                     selected.ConditionAxisCount = selectedDirectional.ConditionAxisCount;
+                    selected.ConditionEffectType = selectedDirectional.ConditionEffectType;
                     selected.ConditionAxes = selectedDirectional.ConditionAxes;
                 }
                 else

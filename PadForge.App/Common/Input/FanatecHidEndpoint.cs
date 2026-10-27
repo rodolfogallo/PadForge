@@ -132,7 +132,7 @@ namespace PadForge.Common.Input
                 var candidates = Enumerate();
                 var report = new
                 {
-                    Mode = "MetadataOnly_NoOutput_NoEngine", Build = typeof(FanatecHidEndpoint).Assembly.GetName().Version?.ToString(), Utc = DateTime.UtcNow,
+                    Mode = "MetadataOnly_NoOutput_NoEngine", Build = "5.1.0.1-csl-dd", Utc = DateTime.UtcNow,
                     Collections = candidates.Select(c => new { c.Path, c.Parent, c.VendorId, c.ProductId, c.UsagePage, c.Usage,
                         OutputReportByteLength = c.OutputLength, OutputReportIds = c.ValidOutputIds.Select(id => $"0x{id:X2}"),
                         ResolvedOutput = Select(c.Path, candidates) })

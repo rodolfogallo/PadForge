@@ -178,12 +178,30 @@ namespace PadForge.Common.Input
         // Step 1 carries the magnitude/period — we capture it here, then OnHidFeature
         // (step 2) drains it into the freshly created effect at EBI=N.
         private EffectState _pending;
+        private enum PendingKind { Constant, Periodic, Ramp, Condition }
+        private PendingKind _pendingKind;
+        // Keep constant parameters independent of condition/periodic traffic.
+        // Driveclub interleaves all three with EBI=0. A shared buffer both
+        // lost live steering and could bind a vibration magnitude to the
+        // constant when the game reconfigured effects at a pause transition.
+        private EffectState _pendingConstant;
+        // Project provisionally only onto a unique tracked constant; unrelated
+        // effect types must not make an otherwise unique steering ambiguous.
+        // Keep the original magnitude for subsequent explicit allocation.
+        private EffectState _pendingConstantTarget;
 
-        private EffectState GetOrCreateForUpdate(byte ebi)
+        private EffectState GetOrCreateForUpdate(byte ebi, PendingKind kind)
         {
             if (ebi == 0)
             {
-                if (_pending == null) _pending = new EffectState();
+                if (kind == PendingKind.Constant)
+                {
+                    _pendingConstantTarget = null;
+                    return _pendingConstant ??= new EffectState();
+                }
+                if (_pending == null || _pendingKind != kind)
+                    _pending = new EffectState();
+                _pendingKind = kind;
                 return _pending;
             }
             if (!_effects.TryGetValue(ebi, out var es))
@@ -198,6 +216,18 @@ namespace PadForge.Common.Input
                 _effects[ebi] = es;
             }
             return es;
+        }
+
+        private EffectState OnlyConstantEffect()
+        {
+            EffectState found = null;
+            foreach (var candidate in _effects.Values)
+            {
+                if (candidate.Type != FfbEffectTypes.Const) continue;
+                if (found != null) return null;
+                found = candidate;
+            }
+            return found;
         }
 
         /// <summary>Decode an HM HID-output packet and update internal effect state.
@@ -341,23 +371,27 @@ namespace PadForge.Common.Input
                             earliestExpiry = expiresAt;
                     }
 
-                    double absMag = Math.Abs(es.Magnitude);
+                    int magnitude = _pendingConstant != null
+                        && ReferenceEquals(es, OnlyConstantEffect())
+                        && ReferenceEquals(es, _pendingConstantTarget)
+                        ? _pendingConstant.Magnitude : es.Magnitude;
+                    double absMag = Math.Abs(magnitude);
                     if (absMag == 0) continue;
 
                     double mag = absMag * (es.Gain / 255.0);
 
-                    if (mag > dominantMag)
+                    bool isCondition =
+                        es.Type == FfbEffectTypes.Spring || es.Type == FfbEffectTypes.Damper ||
+                        es.Type == FfbEffectTypes.Inertia || es.Type == FfbEffectTypes.Friction;
+                    if (!isCondition && mag > dominantMag)
                     {
                         dominantMag = mag;
                         dominantType = (uint)es.Type;
-                        dominantSignedMag = (short)Math.Clamp(es.Magnitude, -10000, 10000);
+                        dominantSignedMag = (short)Math.Clamp(magnitude, -10000, 10000);
                         dominantDir = es.Direction;
                         dominantPeriod = es.Period;
                     }
 
-                    bool isCondition =
-                        es.Type == FfbEffectTypes.Spring  || es.Type == FfbEffectTypes.Damper ||
-                        es.Type == FfbEffectTypes.Inertia || es.Type == FfbEffectTypes.Friction;
                     if (isCondition && es.ConditionAxisCount > 0)
                         conditionEffect = es;
 
@@ -425,6 +459,8 @@ namespace PadForge.Common.Input
                 if (conditionEffect != null)
                 {
                     vib.HasConditionData = true;
+                    vib.ConditionEffectType = conditionEffect.Type;
+                    if (!vib.HasDirectionalData) vib.EffectType = conditionEffect.Type;
                     if (vib.ConditionAxes == null || vib.ConditionAxes.Length < conditionEffect.ConditionAxisCount)
                         vib.ConditionAxes = new ConditionAxisData[conditionEffect.ConditionAxisCount];
                     vib.ConditionAxisCount = conditionEffect.ConditionAxisCount;
@@ -445,6 +481,7 @@ namespace PadForge.Common.Input
                 else
                 {
                     vib.HasConditionData = false;
+                    vib.ConditionEffectType = 0;
                     vib.ConditionAxisCount = 0;
                 }
 
@@ -481,7 +518,9 @@ namespace PadForge.Common.Input
             // fires. Set Effect with a non-zero EBI is the first packet that
             // identifies the new effect, so drain any EBI=0 parameter writes
             // queued by pid.dll's pre-allocation pass into this effect here.
-            DrainPendingInto(GetOrCreate(ebi));
+            var target = GetOrCreate(ebi);
+            target.Type = MapEffectType(effectType);
+            DrainPendingInto(target);
 
             if (_effects.TryGetValue(ebi, out var es))
             {
@@ -520,20 +559,41 @@ namespace PadForge.Common.Input
         // but an EXPLICIT zero (a stop-by-update) must apply.
         private void DrainPendingInto(EffectState es)
         {
-            if (_pending == null || es == null) return;
-            if (_pending.MagnitudeSet)
+            if (es == null) return;
+            bool constant = es.Type == FfbEffectTypes.Const;
+            var pending = constant ? _pendingConstant : _pending;
+            if (pending == null) return;
+            if (!constant)
             {
-                es.Magnitude = _pending.Magnitude;
+                bool compatible = _pendingKind switch
+                {
+                    PendingKind.Ramp => es.Type == FfbEffectTypes.Ramp,
+                    PendingKind.Condition => es.Type == FfbEffectTypes.Spring || es.Type == FfbEffectTypes.Damper
+                        || es.Type == FfbEffectTypes.Inertia || es.Type == FfbEffectTypes.Friction,
+                    PendingKind.Periodic => es.Type == FfbEffectTypes.Square || es.Type == FfbEffectTypes.Sine
+                        || es.Type == FfbEffectTypes.Triangle || es.Type == FfbEffectTypes.SawUp || es.Type == FfbEffectTypes.SawDown,
+                    _ => false,
+                };
+                if (!compatible) return;
+            }
+            if (pending.MagnitudeSet)
+            {
+                es.Magnitude = pending.Magnitude;
                 es.MagnitudeSet = true;
             }
-            if (_pending.Period != 0) es.Period = _pending.Period;
-            if (_pending.ConditionAxisCount > 0)
+            if (pending.Period != 0) es.Period = pending.Period;
+            if (pending.ConditionAxisCount > 0)
             {
-                for (int i = 0; i < _pending.ConditionAxisCount && i < es.ConditionAxes.Length; i++)
-                    es.ConditionAxes[i] = _pending.ConditionAxes[i];
-                es.ConditionAxisCount = Math.Max(es.ConditionAxisCount, _pending.ConditionAxisCount);
+                for (int i = 0; i < pending.ConditionAxisCount && i < es.ConditionAxes.Length; i++)
+                    es.ConditionAxes[i] = pending.ConditionAxes[i];
+                es.ConditionAxisCount = Math.Max(es.ConditionAxisCount, pending.ConditionAxisCount);
             }
-            _pending = null;
+            if (constant)
+            {
+                _pendingConstant = null;
+                _pendingConstantTarget = null;
+            }
+            else _pending = null;
         }
 
         // Set Periodic / Set Envelope. Field shape and signedness are
@@ -589,7 +649,7 @@ namespace PadForge.Common.Input
             if (d.Length >= 11) period = ReadU32(d, 7);
             else if (d.Length >= 6) period = ReadU16(d, 4);
 
-            var es = GetOrCreateForUpdate(ebi);
+            var es = GetOrCreateForUpdate(ebi, PendingKind.Periodic);
             es.Magnitude = canonicalMag;
             es.MagnitudeSet = true;
             es.Period = period;
@@ -607,9 +667,22 @@ namespace PadForge.Common.Input
             int canonicalMag = (int)Math.Round(wireMag * _constantMagScale);
             canonicalMag = Math.Clamp(canonicalMag, -10000, 10000);
 
-            var es = GetOrCreateForUpdate(ebi);
+            var es = GetOrCreateForUpdate(ebi, PendingKind.Constant);
             es.Magnitude = canonicalMag;
             es.MagnitudeSet = true;
+            if (ebi == 0)
+            {
+                var candidate = OnlyConstantEffect();
+                if (candidate != null && candidate.Running)
+                    _pendingConstantTarget = candidate;
+            }
+            else if (ReferenceEquals(es, _pendingConstantTarget))
+            {
+                // A newer explicitly addressed write supersedes the
+                // provisional live projection and its stale pending value.
+                _pendingConstantTarget = null;
+                _pendingConstant = null;
+            }
         }
 
         // Set Ramp Force: [EBI][Start:2 signed][End:2 signed]. Same scaling
@@ -626,7 +699,7 @@ namespace PadForge.Common.Input
             int peak = Math.Max(Math.Abs(canonicalStart), Math.Abs(canonicalEnd));
             peak = Math.Clamp(peak, 0, 10000);
 
-            var es = GetOrCreateForUpdate(ebi);
+            var es = GetOrCreateForUpdate(ebi, PendingKind.Ramp);
             es.Magnitude = peak;
             es.MagnitudeSet = true;
         }
@@ -673,7 +746,7 @@ namespace PadForge.Common.Input
             int axisIdx = ts0;
             if (axisIdx > 1) axisIdx = 0;
 
-            var es = GetOrCreateForUpdate(ebi);
+            var es = GetOrCreateForUpdate(ebi, PendingKind.Condition);
             es.ConditionAxes[axisIdx] = new ConditionAxis
             {
                 CenterPointOffset = cpOffset,
@@ -775,6 +848,8 @@ namespace PadForge.Common.Input
                 case 4: // device reset
                     _effects.Clear();
                     _pending = null;
+                    _pendingConstant = null;
+                    _pendingConstantTarget = null;
                     _deviceGain = 255;
                     _lastEbi = 0;
                     _stateFlags = PidStateFlags.ActuatorsEnabled | PidStateFlags.ActuatorPower;

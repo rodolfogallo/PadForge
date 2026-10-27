@@ -100,7 +100,8 @@ namespace PadForge.Engine
             {
                 int count = value.HasConditionData
                     ? Math.Clamp(value.ConditionAxisCount, 0, Math.Min(value.ConditionAxes?.Length ?? 0, 2)) : 0;
-                return new(value.HasDirectionalData, value.HasConditionData, value.EffectType,
+                return new(value.HasDirectionalData, value.HasConditionData,
+                    value.HasConditionData && value.ConditionEffectType != 0 ? value.ConditionEffectType : value.EffectType,
                     value.SignedMagnitude, value.Direction, value.Period, value.DeviceGain,
                     overallGain, value.LeftMotorSpeed, value.RightMotorSpeed, count,
                     count > 0 ? ConditionSnapshot.Capture(value.ConditionAxes[0]) : default,
@@ -1109,6 +1110,10 @@ namespace PadForge.Engine
 
         /// <summary>True when per-axis condition data is available.</summary>
         public bool HasConditionData { get; set; }
+
+        /// <summary>Type of the condition block, independent of a simultaneous
+        /// constant/periodic effect. Zero falls back to EffectType for legacy producers.</summary>
+        public uint ConditionEffectType { get; set; }
 
         /// <summary>Per-axis condition coefficients.
         /// Index 0 = X axis, Index 1 = Y axis. Null when no condition data.</summary>
