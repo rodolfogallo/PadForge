@@ -45,6 +45,13 @@ general way to identify the intended target among multiple effects.
   before the change and passes with it.
 - Tests cover live zero/resume/stop, pending preallocation, explicit updates,
   multiple effects, later allocation, other types, actuator disable and reset.
+- All 24 selected tests passed in Release on Windows x64 against upstream
+  main `523a132b755d47b435e83a3d231284880871d29d`, without the separate
+  CSL DD transport patch:
+
+  ```powershell
+  dotnet test PadForge.Tests/PadForge.Tests.csproj -c Release --filter 'FullyQualifiedName~AzimuthLiveFfbTests|FullyQualifiedName~FfbDecoderDescriptorTests|FullyQualifiedName~RumbleAudioFfb|FullyQualifiedName~PidDeviceControlTests'
+  ```
 - In a local 5.1.0.2 build combining this change with the prior CSL DD transport
   fix, the hardware owner confirmed working FFB on the track. Diagnostics
   showed varying positive/negative constant forces and successful native HID
