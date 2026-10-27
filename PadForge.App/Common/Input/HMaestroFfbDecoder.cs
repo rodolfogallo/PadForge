@@ -178,11 +178,19 @@ namespace PadForge.Common.Input
         // Step 1 carries the magnitude/period — we capture it here, then OnHidFeature
         // (step 2) drains it into the freshly created effect at EBI=N.
         private EffectState _pending;
+        // Azimuth 1.0.2 updates a running constant through EBI=0 without
+        // another Start. Preserve the pending buffer for later allocation,
+        // but project it provisionally onto a sole tracked, running constant.
+        // Do not mutate that effect: a later allocation may bind the pending
+        // write to a different effect. Multiple effects remain unambiguous
+        // only through an explicit EBI, Set Effect or Start.
+        private EffectState _pendingConstantTarget;
 
         private EffectState GetOrCreateForUpdate(byte ebi)
         {
             if (ebi == 0)
             {
+                _pendingConstantTarget = null;
                 if (_pending == null) _pending = new EffectState();
                 return _pending;
             }
@@ -341,7 +349,10 @@ namespace PadForge.Common.Input
                             earliestExpiry = expiresAt;
                     }
 
-                    double absMag = Math.Abs(es.Magnitude);
+                    int magnitude = _pending != null && _effects.Count == 1
+                        && ReferenceEquals(es, _pendingConstantTarget)
+                        ? _pending.Magnitude : es.Magnitude;
+                    double absMag = Math.Abs(magnitude);
                     if (absMag == 0) continue;
 
                     double mag = absMag * (es.Gain / 255.0);
@@ -350,7 +361,7 @@ namespace PadForge.Common.Input
                     {
                         dominantMag = mag;
                         dominantType = (uint)es.Type;
-                        dominantSignedMag = (short)Math.Clamp(es.Magnitude, -10000, 10000);
+                        dominantSignedMag = (short)Math.Clamp(magnitude, -10000, 10000);
                         dominantDir = es.Direction;
                         dominantPeriod = es.Period;
                     }
@@ -521,6 +532,7 @@ namespace PadForge.Common.Input
         private void DrainPendingInto(EffectState es)
         {
             if (_pending == null || es == null) return;
+            _pendingConstantTarget = null;
             if (_pending.MagnitudeSet)
             {
                 es.Magnitude = _pending.Magnitude;
@@ -610,6 +622,18 @@ namespace PadForge.Common.Input
             var es = GetOrCreateForUpdate(ebi);
             es.Magnitude = canonicalMag;
             es.MagnitudeSet = true;
+            if (ebi == 0 && _effects.Count == 1)
+            {
+                foreach (var candidate in _effects.Values)
+                    if (candidate.Running && candidate.Type == FfbEffectTypes.Const)
+                        _pendingConstantTarget = candidate;
+            }
+            else if (ReferenceEquals(es, _pendingConstantTarget))
+            {
+                // A newer explicitly addressed write supersedes the
+                // provisional live projection, without losing pending data.
+                _pendingConstantTarget = null;
+            }
         }
 
         // Set Ramp Force: [EBI][Start:2 signed][End:2 signed]. Same scaling
